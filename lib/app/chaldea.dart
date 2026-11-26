@@ -31,6 +31,8 @@ import '../packages/platform/platform.dart';
 import 'app.dart';
 import 'modules/auth/change_email_page.dart';
 import 'modules/home/subpage/privacy_center_page.dart';
+import 'modules/import_data/import_https_page.dart';
+import 'modules/import_data/sniff_inbox.dart';
 import 'routes/parser.dart';
 import 'tools/app_window.dart';
 
@@ -131,12 +133,33 @@ class _ChaldeaState extends State<Chaldea> with AfterLayoutMixin, WidgetsBinding
 
     // Keep the framework's lifecycle handler so a background launch can resume frame scheduling.
     WidgetsBinding.instance.addObserver(this);
+    // 静态数据是 BootstrapPage 异步加载的，afterFirstLayout 那会儿还不可用，
+    // 所以还要盯住 dataReady：它一变 true 就再试一次。
+    rootRouter.appState.addListener(_onAppStateChanged);
+  }
+
+  bool _lastDataReady = false;
+
+  void _onAppStateChanged() {
+    final ready = rootRouter.appState.dataReady;
+    if (ready && !_lastDataReady) {
+      _lastDataReady = true;
+      // 这个回调是在 notifyListeners 里同步进来的，此刻树正在重建，
+      // 直接 pushPage 会和 BootstrapPage → 主页的切换抢同一帧。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_takeSniffInbox());
+      });
+    } else if (!ready) {
+      _lastDataReady = false;
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) async {
     if (state == AppLifecycleState.resumed) {
       network.check();
+      // 模块在游戏登录后会把 Chaldea 拉到前台，这里接住那份登录包。
+      unawaited(_takeSniffInbox());
     } else if (state == AppLifecycleState.inactive || state == AppLifecycleState.hidden) {
       db.saveAll();
       if (NetworkManagerBase.hasCalled) {
@@ -207,6 +230,14 @@ class _ChaldeaState extends State<Chaldea> with AfterLayoutMixin, WidgetsBinding
 
     if (db.settings.platform.showSystemTray) AppWindowUtil.setTray();
 
+    // 这一份是自编译分支：包名和官方版相同，但签名不同。
+    // 官方更新包下下来必然 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+    // 与其让用户白等一次下载再看到「应用未安装」，不如直接关掉。
+    if (db.settings.network.autoUpdateApp) {
+      db.settings.network.autoUpdateApp = false;
+      unawaited(db.saveSettings());
+    }
+
     CachedApi.remoteConfig();
     if (db.settings.network.autoUpdateApp &&
         !kIsWeb &&
@@ -233,6 +264,40 @@ class _ChaldeaState extends State<Chaldea> with AfterLayoutMixin, WidgetsBinding
 
     FilePickerU.clearTemporaryFiles();
     if (mounted) setState(() {});
+    unawaited(_takeSniffInbox());
+  }
+
+  bool _takingSniffInbox = false;
+
+  /// 模块（LSPosed）把登录包写到 appPath/sniff_inbox.txt，这里在启动和每次
+  /// 回到前台时各取一次。取到就自动走一遍导入，全程不需要点击。
+  Future<void> _takeSniffInbox() async {
+    if (_takingSniffInbox) return;
+    // 隐私未同意、静态数据未下完都不该动这份数据：
+    // 前者不该在用户授权前处理账号信息，后者 SniffInbox.take() 会保留文件。
+    if (rootRouter.appState.consentPending || !db.settings.display.privacy.consentSatisfied) {
+      return;
+    }
+    _takingSniffInbox = true;
+    try {
+      // 静态数据由 BootstrapPage 异步加载，这里最多等 12 秒。
+      // 拿不到 dataReady 的回调也不会漏：resumed 和 dataReady 都会再进来一次。
+      for (int i = 0; i < 6; i++) {
+        if (!SniffInbox.hasPending) return;
+        final text = await SniffInbox.take();
+        if (text != null) {
+          if (!mounted) return;
+          await router.pushPage(ImportHttpPage(toploginText: text, autoImport: true));
+          return;
+        }
+        if (db.gameData.isValid) return; // 数据就绪但文件不可用（太短），收工
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    } catch (e, s) {
+      logger.e('sniff inbox: 自动导入失败', e, s);
+    } finally {
+      _takingSniffInbox = false;
+    }
   }
 
   /// Best-effort silent migration of legacy Worker session secrets to JWT.
@@ -330,6 +395,7 @@ class _ChaldeaState extends State<Chaldea> with AfterLayoutMixin, WidgetsBinding
 
   @override
   void dispose() {
+    rootRouter.appState.removeListener(_onAppStateChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

@@ -35,8 +35,17 @@ class ImportHttpPage extends StatefulWidget {
   final MasterDataManager? mstData;
   final Region? region;
 
-  ImportHttpPage({super.key, this.toploginText, this.mstData, this.region})
-    : assert(toploginText == null || mstData == null);
+  /// 来自 `SniffInbox`（模块自动送进来的登录包）：
+  /// 解析完直接导入，跳过确认框，导入完成后自动退回。
+  final bool autoImport;
+
+  ImportHttpPage({
+    super.key,
+    this.toploginText,
+    this.mstData,
+    this.region,
+    this.autoImport = false,
+  }) : assert(toploginText == null || mstData == null);
 
   @override
   ImportHttpPageState createState() => ImportHttpPageState();
@@ -105,6 +114,13 @@ class ImportHttpPageState extends State<ImportHttpPage> {
       }
     } catch (e, s) {
       logger.e('init http packages cache failed', e, s);
+    }
+    if (widget.autoImport && mounted) {
+      // 等这一帧画完再导：build 里要先算出 mstData 才能渲染统计，
+      // 提前调用会让用户看到一屏空白。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) didImportData(auto: true);
+      });
     }
   }
 
@@ -796,15 +812,23 @@ class ImportHttpPageState extends State<ImportHttpPage> {
     }
   }
 
-  void didImportData() async {
+  void didImportData({bool auto = false}) async {
     final user = db.curUser;
     final userGame = mstData?.user;
     if (mstData == null || userGame == null) {
       EasyLoading.showError('No user data found.\nIs it valid?');
+      if (auto && mounted) Navigator.of(context).maybePop();
       return;
     }
     final lastImportDifferent = user.lastImportId != null && user.lastImportId != userGame.friendCode;
-    if (lastImportDifferent) {
+    if (auto) {
+      // 自动导入不弹框：模块只会在游戏登录成功后才送数据，这条链路上没人
+      // 点得动确认框。账号真的换了也照导，只留一条日志——
+      // lastImportId 本来就是为了记录这件事。
+      if (lastImportDifferent) {
+        logger.w('sniff inbox: 导入账号切换 ${user.lastImportId} -> ${userGame.friendCode}');
+      }
+    } else if (lastImportDifferent) {
       final diffConfirm = await ConfirmSliderDialog(
         title: Text(S.current.warning),
         content: Text(
@@ -934,6 +958,10 @@ class ImportHttpPageState extends State<ImportHttpPage> {
     db.itemCenter.init();
     await db.saveUserData();
     EasyLoading.showSuccess(S.current.success);
+    if (auto && mounted) {
+      // 自动导入不需要停在这一页看统计；成功提示是 overlay，退回后照样显示。
+      Navigator.of(context).maybePop();
+    }
   }
 
   void importResponseBody() async {

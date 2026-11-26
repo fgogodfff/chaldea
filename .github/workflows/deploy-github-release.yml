@@ -8,6 +8,11 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
+    inputs:
+      android_only:
+        description: '只构建 Android APK（跳过 windows/linux）'
+        type: boolean
+        default: true
 
 # One release build per ref at a time. Beta builds (main) supersede each other,
 # tagged releases are never cancelled half-way.
@@ -22,6 +27,10 @@ permissions:
 jobs:
   create-build:
     name: Create ${{ matrix.target }} build
+    # 手动触发时默认只编 Android：这个分支只为出一个能装机的 APK，
+    # windows/linux 陪跑一遍要多花二十多分钟。
+    # push 触发时 inputs 为空，条件恒真，行为与上游一致。
+    if: ${{ !inputs.android_only || matrix.target == 'android' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
