@@ -116,8 +116,19 @@ jobs:
           used=""
           if install_keystore "$KEY_B64"; then
             used="$KEY_B64"
-          elif [ "$KEY_LEN" -gt "$EXPECTED_LEN" ]; then
-            for candidate in "${KEY_B64:0:$EXPECTED_LEN}" "${KEY_B64:$(( KEY_LEN - EXPECTED_LEN )):$EXPECTED_LEN}"; do
+          else
+            # 常见两类脏数据：多出零散字符（取前/后 N 即可），或整份 secrets.txt
+            # 四行一起粘进来（此时要靠正则把 MII 开头的 base64 主体抠出来）。
+            candidates=()
+            if [ "$KEY_LEN" -gt "$EXPECTED_LEN" ]; then
+              candidates+=("${KEY_B64:0:$EXPECTED_LEN}" "${KEY_B64:$(( KEY_LEN - EXPECTED_LEN )):$EXPECTED_LEN}")
+            fi
+            # PKCS12 的 DER 头恒为 30 82 → base64 必以 MII 开头，遇到非 base64 字符即断开。
+            CORE="$(printf '%s' "$KEY_B64" | grep -oE 'MII[A-Za-z0-9+/=]{200,}' | head -1 || true)"
+            if [ -n "$CORE" ] && [ "$CORE" != "$KEY_B64" ]; then
+              candidates+=("$CORE" "${CORE:0:$EXPECTED_LEN}")
+            fi
+            for candidate in "${candidates[@]}"; do
               if install_keystore "$candidate"; then
                 used="$candidate"
                 break
@@ -130,7 +141,7 @@ jobs:
             exit 1
           fi
           if [ "${#used}" -ne "$KEY_LEN" ]; then
-            echo "::warning::secret holds ${KEY_LEN} chars, recovered the valid ${EXPECTED_LEN}-char keystore - please re-enter PLAY_STORE_UPLOAD_KEY so this warning goes away"
+            echo "::warning::secret holds ${KEY_LEN} chars, recovered the valid ${EXPECTED_LEN}-char keystore - re-enter PLAY_STORE_UPLOAD_KEY with the base64 line only so this warning goes away"
           fi
           rm -f ks-info.txt
           printf 'storeFile=upload-keystore.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
