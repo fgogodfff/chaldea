@@ -88,41 +88,53 @@ jobs:
         if: matrix.target != 'windows'
         run: flutter doctor -v
 
-      # The secret is a one-line base64 blob, but copy/paste through the GitHub
-      # UI tends to smuggle in spaces or line breaks, and `base64 -d` then dies
-      # with a bare "invalid input". Strip whitespace, sanity-check the length
-      # and validate the keystore here so a bad secret fails with a clear
-      # message instead of an opaque decode error.
+      # keystore 以单行 base64 存在 PLAY_STORE_UPLOAD_KEY 里，但经 GitHub 网页粘贴
+      # 常混入空白或多余字符，`base64 -d` 只会抛一句 "invalid input"。这里先清洗空白，
+      # 再依次尝试「原样 / 取前 N 字符 / 取后 N 字符」，每个候选都真解一次并用 keytool
+      # 验证能否开出证书；能开就用它继续构建，省掉手工重录整串密钥。
       - name: Configure Keystore for Android
         if: matrix.target == 'android'
         shell: bash
         run: |
           set -euo pipefail
+          # 本地 build/keystore/upload-keystore.b64 恒为 3456 字符；换密钥要同步改这里。
+          EXPECTED_LEN=3456
           KEY_B64="$(printf '%s' "$PLAY_STORE_UPLOAD_KEY" | tr -d ' \t\r\n')"
-          echo "keystore secret: raw=${#PLAY_STORE_UPLOAD_KEY} chars, cleaned=${#KEY_B64} chars, expected 3456"
-          if [ "$(( ${#KEY_B64} % 4 ))" -ne 0 ] || [ "${#KEY_B64}" -lt 1000 ]; then
-            echo "::error::PLAY_STORE_UPLOAD_KEY is inconsistent (cleaned=${#KEY_B64} chars) - the secret was probably truncated, please re-enter it"
+          KEY_LEN="${#KEY_B64}"
+          echo "keystore secret: raw=${#PLAY_STORE_UPLOAD_KEY} chars, cleaned=${KEY_LEN} chars, expected ${EXPECTED_LEN}"
+          echo "head=${KEY_B64:0:16} tail=${KEY_B64:${KEY_LEN}-16}"
+          echo "sha256=$(printf '%s' "$KEY_B64" | sha256sum | cut -d' ' -f1)"
+
+          install_keystore() {
+            printf '%s' "$1" | base64 --decode > app/upload-keystore.jks 2>/dev/null || return 1
+            keytool -list -keystore app/upload-keystore.jks -storetype PKCS12 \
+              -storepass "$KEYSTORE_STORE_PASSWORD" > ks-info.txt 2>&1 || return 1
+            grep -q "$KEYSTORE_KEY_ALIAS" ks-info.txt || return 1
+            return 0
+          }
+
+          used=""
+          if install_keystore "$KEY_B64"; then
+            used="$KEY_B64"
+          elif [ "$KEY_LEN" -gt "$EXPECTED_LEN" ]; then
+            for candidate in "${KEY_B64:0:$EXPECTED_LEN}" "${KEY_B64:$(( KEY_LEN - EXPECTED_LEN )):$EXPECTED_LEN}"; do
+              if install_keystore "$candidate"; then
+                used="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$used" ]; then
+            echo "::error::PLAY_STORE_UPLOAD_KEY cannot be decoded into a usable keystore (cleaned=${KEY_LEN} chars, see head/tail above) - please re-enter the secret"
             exit 1
           fi
-          # 本地 build/keystore/upload-keystore.b64 恒为 3456 字符；换了密钥要同步改这里。
-          if [ "${#KEY_B64}" -ne 3456 ]; then
-            echo "::warning::cleaned length ${#KEY_B64} != 3456 - the secret looks truncated, decoding a damaged keystore"
+          if [ "${#used}" -ne "$KEY_LEN" ]; then
+            echo "::warning::secret holds ${KEY_LEN} chars, recovered the valid ${EXPECTED_LEN}-char keystore - please re-enter PLAY_STORE_UPLOAD_KEY so this warning goes away"
           fi
-          printf '%s' "$KEY_B64" | base64 --decode > app/upload-keystore.jks
+          rm -f ks-info.txt
           printf 'storeFile=upload-keystore.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
             "$KEYSTORE_KEY_ALIAS" "$KEYSTORE_STORE_PASSWORD" "$KEYSTORE_KEY_PASSWORD" > key.properties
-          if ! KS_INFO="$(keytool -list -keystore app/upload-keystore.jks -storetype PKCS12 \
-            -storepass "$KEYSTORE_STORE_PASSWORD" 2>&1)"; then
-            echo "::error::keystore cannot be opened (bad KEYSTORE_STORE_PASSWORD, truncated secret or wrong alias): $KS_INFO"
-            exit 1
-          fi
-          case "$KS_INFO" in
-            *"$KEYSTORE_KEY_ALIAS"*) ;;
-            *)
-              echo "::error::alias $KEYSTORE_KEY_ALIAS not found in keystore"
-              exit 1
-              ;;
-          esac
           echo "keystore ok: $(wc -c < app/upload-keystore.jks) bytes, alias=$KEYSTORE_KEY_ALIAS"
         env:
           PLAY_STORE_UPLOAD_KEY: ${{ secrets.PLAY_STORE_UPLOAD_KEY }}
