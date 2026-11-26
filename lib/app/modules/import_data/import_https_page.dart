@@ -39,13 +39,8 @@ class ImportHttpPage extends StatefulWidget {
   /// 解析完直接导入，跳过确认框，导入完成后自动退回。
   final bool autoImport;
 
-  ImportHttpPage({
-    super.key,
-    this.toploginText,
-    this.mstData,
-    this.region,
-    this.autoImport = false,
-  }) : assert(toploginText == null || mstData == null);
+  ImportHttpPage({super.key, this.toploginText, this.mstData, this.region, this.autoImport = false})
+    : assert(toploginText == null || mstData == null);
 
   @override
   ImportHttpPageState createState() => ImportHttpPageState();
