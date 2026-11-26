@@ -97,6 +97,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 版本标记：方便确认这次跑的到底是哪版脚本（Re-run 会复用旧 commit）。
+          echo "keystore step: build 3 (auto-recover by MII anchor)"
           # 本地 build/keystore/upload-keystore.b64 恒为 3456 字符；换密钥要同步改这里。
           EXPECTED_LEN=3456
           KEY_B64="$(printf '%s' "$PLAY_STORE_UPLOAD_KEY" | tr -d ' \t\r\n')"
