@@ -88,14 +88,42 @@ jobs:
         if: matrix.target != 'windows'
         run: flutter doctor -v
 
+      # The secret is a one-line base64 blob, but copy/paste through the GitHub
+      # UI tends to smuggle in spaces or line breaks, and `base64 -d` then dies
+      # with a bare "invalid input". Strip whitespace, sanity-check the length
+      # and validate the keystore here so a bad secret fails with a clear
+      # message instead of an opaque decode error.
       - name: Configure Keystore for Android
         if: matrix.target == 'android'
+        shell: bash
         run: |
-          echo "$PLAY_STORE_UPLOAD_KEY" | base64 --decode > app/upload-keystore.jks
-          echo "storeFile=upload-keystore.jks" >> key.properties
-          echo "keyAlias=$KEYSTORE_KEY_ALIAS" >> key.properties
-          echo "storePassword=$KEYSTORE_STORE_PASSWORD" >> key.properties
-          echo "keyPassword=$KEYSTORE_KEY_PASSWORD" >> key.properties
+          set -euo pipefail
+          KEY_B64="$(printf '%s' "$PLAY_STORE_UPLOAD_KEY" | tr -d ' \t\r\n')"
+          echo "keystore secret: raw=${#PLAY_STORE_UPLOAD_KEY} chars, cleaned=${#KEY_B64} chars, expected 3456"
+          if [ "$(( ${#KEY_B64} % 4 ))" -ne 0 ] || [ "${#KEY_B64}" -lt 1000 ]; then
+            echo "::error::PLAY_STORE_UPLOAD_KEY is inconsistent (cleaned=${#KEY_B64} chars) - the secret was probably truncated, please re-enter it"
+            exit 1
+          fi
+          # 本地 build/keystore/upload-keystore.b64 恒为 3456 字符；换了密钥要同步改这里。
+          if [ "${#KEY_B64}" -ne 3456 ]; then
+            echo "::warning::cleaned length ${#KEY_B64} != 3456 - the secret looks truncated, decoding a damaged keystore"
+          fi
+          printf '%s' "$KEY_B64" | base64 --decode > app/upload-keystore.jks
+          printf 'storeFile=upload-keystore.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_KEY_ALIAS" "$KEYSTORE_STORE_PASSWORD" "$KEYSTORE_KEY_PASSWORD" > key.properties
+          if ! KS_INFO="$(keytool -list -keystore app/upload-keystore.jks -storetype PKCS12 \
+            -storepass "$KEYSTORE_STORE_PASSWORD" 2>&1)"; then
+            echo "::error::keystore cannot be opened (bad KEYSTORE_STORE_PASSWORD, truncated secret or wrong alias): $KS_INFO"
+            exit 1
+          fi
+          case "$KS_INFO" in
+            *"$KEYSTORE_KEY_ALIAS"*) ;;
+            *)
+              echo "::error::alias $KEYSTORE_KEY_ALIAS not found in keystore"
+              exit 1
+              ;;
+          esac
+          echo "keystore ok: $(wc -c < app/upload-keystore.jks) bytes, alias=$KEYSTORE_KEY_ALIAS"
         env:
           PLAY_STORE_UPLOAD_KEY: ${{ secrets.PLAY_STORE_UPLOAD_KEY }}
           KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
